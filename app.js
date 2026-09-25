@@ -1,7 +1,7 @@
 /* Habit tracker PWA: local-first, synced to a private GitHub Gist. No build step, no dependencies. */
 'use strict';
 
-const APP_VERSION = '1.1.0';
+const APP_VERSION = '1.2.0';
 const LS_STATE = 'hp.state.v1';
 const LS_TOKEN = 'hp.token';
 const LS_GIST = 'hp.gist';
@@ -54,9 +54,40 @@ const pctText = (p) => (p == null ? '–' : Math.round(p * 100) + '%');
 const statusColor = (p) => (p == null ? 'var(--line)' : p < 0.4 ? STATUS.bad : p < 0.7 ? STATUS.mid : STATUS.good);
 const statusClass = (p) => (p == null ? '' : p < 0.4 ? 'pct-lo' : p < 0.7 ? 'pct-mid' : 'pct-hi');
 const reduceMotion = () => window.matchMedia('(prefers-reduced-motion: reduce)').matches;
-const vibrate = (ms) => { try { navigator.vibrate && navigator.vibrate(ms); } catch (e) { /* ignore */ } };
 const lsGet = (k) => { try { return localStorage.getItem(k); } catch (e) { return null; } };
 const lsSet = (k, v) => { try { v == null ? localStorage.removeItem(k) : localStorage.setItem(k, v); } catch (e) { /* ignore */ } };
+/* ------------------------------------------------------------------ feedback: haptics + sound */
+const prefs = { haptics: lsGet('hp.haptics') !== '0', sound: lsGet('hp.sound') !== '0' };
+const vibrate = (p) => { if (!prefs.haptics || (navigator.userActivation && !navigator.userActivation.hasBeenActive)) return; try { navigator.vibrate && navigator.vibrate(p); } catch (e) { /* ignore */ } };
+const HAPTIC = { tap: 8, tick: 4, edge: 12, done: [10, 28, 18], undo: 6, perfect: [18, 40, 18, 40, 45] };
+let actx = null;
+function audioCtx() {
+  try {
+    if (!actx) { const AC = window.AudioContext || window.webkitAudioContext; if (!AC) return null; actx = new AC(); }
+    if (actx.state === 'suspended') actx.resume();
+    return actx;
+  } catch (e) { return null; }
+}
+/** Soft bell: sine + quiet octave overtone, fast attack, smooth decay. 'done' = two rising notes, 'perfect' = short arpeggio. */
+function chime(kind = 'done') {
+  if (!prefs.sound) return;
+  const ctx = audioCtx(); if (!ctx) return;
+  const t0 = ctx.currentTime + 0.01;
+  const notes = kind === 'perfect' ? [[1046.5, 0], [1318.5, 0.09], [1568, 0.18], [2093, 0.3]] : [[1318.5, 0], [1975.5, 0.08]];
+  const master = ctx.createGain(); master.gain.value = kind === 'perfect' ? 0.16 : 0.13; master.connect(ctx.destination);
+  notes.forEach(([f, dt], i) => {
+    const g = ctx.createGain(), len = i === notes.length - 1 ? 0.55 : 0.3;
+    g.gain.setValueAtTime(0.0001, t0 + dt);
+    g.gain.exponentialRampToValueAtTime(1, t0 + dt + 0.008);
+    g.gain.exponentialRampToValueAtTime(0.0001, t0 + dt + len);
+    g.connect(master);
+    [[f, 1], [f * 2.005, 0.12]].forEach(([freq, amp]) => {
+      const o = ctx.createOscillator(), og = ctx.createGain();
+      o.type = 'sine'; o.frequency.value = freq; og.gain.value = amp;
+      o.connect(og); og.connect(g); o.start(t0 + dt); o.stop(t0 + dt + len + 0.05);
+    });
+  });
+}
 
 function stableStringify(v) {
   if (Array.isArray(v)) return '[' + v.map(stableStringify).join(',') + ']';
@@ -657,6 +688,11 @@ function settingsSheet(msg = '') {
       <p class="small" id="tokErr" style="color:var(--bad);min-height:18px;margin:-8px 0 8px">${esc(msg)}</p>
       <button class="btn block good" data-action="connect">חבר וסנכרן</button>`}
     <div class="divider"></div>
+    <div class="label" style="font-weight:600;margin-bottom:8px">משוב</div>
+    <div class="btn-row" style="margin-bottom:6px"><button class="chip" style="justify-content:center" data-action="pref" data-pref="haptics" aria-pressed="${prefs.haptics}">📳 רטט</button>
+      <button class="chip" style="justify-content:center" data-action="pref" data-pref="sound" aria-pressed="${prefs.sound}">🔔 צליל הצלחה</button></div>
+    <p class="small" style="margin:0 0 4px">הצליל נשמע לפי עוצמת המדיה של הטלפון.</p>
+    <div class="divider"></div>
     <div class="field"><label for="nameIn">איך לקרוא לך?</label><input class="input" id="nameIn" maxlength="24" value="${esc(S.profile.name)}" placeholder="השם שלך (לא חובה)"></div>
     <div class="divider"></div>
     <div class="label" style="font-weight:600;margin-bottom:8px">סיכום באקסל</div>
@@ -706,7 +742,7 @@ function render() {
   ({ today: renderToday, month: renderMonth, stats: renderStats, habits: renderHabits }[ui.tab] || renderToday)();
 }
 function go(tab) {
-  ui.tab = tab; ui.anim = true;
+  ui.tab = tab; ui.anim = true; ui.quietScroll = performance.now() + 400;
   history.replaceState(history.state, '', '#' + tab);
   window.scrollTo({ top: 0 });
   render();
@@ -723,11 +759,14 @@ document.addEventListener('click', (e) => {
     case 'toggle': {
       const id = el.dataset.id, dk = ui.day, before = dayStat(dk);
       const v = !isDone(id, dk);
-      setDone(id, dk, v); vibrate(v ? 12 : 6);
+      setDone(id, dk, v);
       render();
       const card = view.querySelector(`.habit[data-id="${id}"]`); if (card && v) card.classList.add('pop');
       const after = dayStat(dk);
-      if (v && after.total && after.done === after.total && before.done < before.total) { confetti(); vibrate([30, 40, 30]); }
+      const perfect = v && after.total && after.done === after.total && before.done < before.total;
+      if (perfect) { confetti(); vibrate(HAPTIC.perfect); chime('perfect'); }
+      else if (v) { vibrate(HAPTIC.done); chime('done'); }
+      else vibrate(HAPTIC.undo);
       break;
     }
     case 'pick-day': ui.day = el.dataset.day; render(); break;
@@ -742,7 +781,7 @@ document.addEventListener('click', (e) => {
     }
     case 'start': {
       [...ui.pick].forEach((k) => { const [n, em] = k.split('|'); addHabit({ name: n, emoji: em }); });
-      ui.pick.clear(); save(); vibrate(20); toast('יאללה, מתחילים 💪'); render(); break;
+      ui.pick.clear(); save(); vibrate(HAPTIC.done); chime('done'); toast('יאללה, מתחילים 💪'); render(); break;
     }
     case 'month': {
       let { y, m } = ui.month; m += Number(el.dataset.dir);
@@ -751,7 +790,8 @@ document.addEventListener('click', (e) => {
     }
     case 'cell': {
       const v = !isDone(el.dataset.id, el.dataset.day);
-      setDone(el.dataset.id, el.dataset.day, v); vibrate(8);
+      setDone(el.dataset.id, el.dataset.day, v);
+      if (v) { vibrate(HAPTIC.done); chime('done'); } else vibrate(HAPTIC.undo);
       el.setAttribute('aria-pressed', String(v));
       const wrap = $('#gridWrap'); ui.gridScroll = wrap ? wrap.scrollLeft : null;
       render();
@@ -770,7 +810,7 @@ document.addEventListener('click', (e) => {
     }
     case 'lib-add': {
       if (el.getAttribute('aria-pressed') === 'true') { toast('כבר ברשימה שלך'); break; }
-      const id = addHabit({ name: el.dataset.name, emoji: el.dataset.emoji }); save(); vibrate(10);
+      const id = addHabit({ name: el.dataset.name, emoji: el.dataset.emoji }); save();
       render();
       toast(`נוסף: ${el.dataset.name}`, { label: 'בטל', fn: () => { S.habits[id] = { ...S.habits[id], deleted: true, t: now() }; save(); render(); } });
       break;
@@ -818,6 +858,12 @@ document.addEventListener('click', (e) => {
     case 'export-xlsx': exportXlsx(); break;
     case 'xlsx-download': downloadBlob(ui.xlsx.blob, ui.xlsx.name); toast('הקובץ ירד'); break;
     case 'xlsx-share': shareXlsx(); break;
+    case 'pref': {
+      const k = el.dataset.pref; prefs[k] = !prefs[k]; lsSet('hp.' + k, prefs[k] ? '1' : '0');
+      el.setAttribute('aria-pressed', String(prefs[k]));
+      if (prefs[k]) { if (k === 'sound') chime('done'); else vibrate(HAPTIC.done); }
+      break;
+    }
     default: break;
   }
 });
@@ -826,11 +872,39 @@ document.addEventListener('input', (e) => {
   const r = e.target.closest('input[data-mind]');
   if (!r) return;
   const f = r.dataset.mind, v = Number(r.value);
+  if (mindVal(ui.day, f) !== v) vibrate(HAPTIC.tick);
   r.classList.remove('unset'); r.style.setProperty('--p', ((v - 1) / 9) * 100 + '%'); r.setAttribute('aria-valuetext', v + ' מתוך 10');
   const out = $('#mv-' + f); out.classList.remove('empty'); out.innerHTML = `<span class="num">${v}</span>`;
   setMind(ui.day, f, v);
   $('#mindScore').textContent = pctText(mindScore(ui.day));
 });
+/* light tap on every control; toggles get their own richer pattern */
+const TAP_SEL = 'button, a.btn, [data-action], .tab, input[type=range], summary';
+document.addEventListener('pointerdown', (e) => {
+  audioCtx(); // unlock audio inside a user gesture
+  const el = e.target.closest(TAP_SEL);
+  if (el && !el.disabled && !['toggle', 'cell'].includes(el.dataset.action)) vibrate(HAPTIC.tap);
+}, { passive: true });
+/* a soft tick every ~one card of vertical scrolling, a firmer bump at the top and bottom */
+(function scrollHaptics() {
+  const last = new WeakMap(); let lastBuzz = 0, touching = false, lastTouch = 0;
+  addEventListener('touchstart', () => { touching = true; }, { passive: true });
+  addEventListener('touchend', () => { touching = false; lastTouch = performance.now(); }, { passive: true });
+  document.addEventListener('scroll', (e) => {
+    const now = performance.now();
+    if (!touching && now - lastTouch > 700) return; // only movement the finger started
+    if (now < (ui.quietScroll || 0)) return; // ignore our own jumps (tab change)
+    const el = e.target === document ? document.scrollingElement : e.target;
+    if (!el || el.classList && el.classList.contains('grid-wrap')) return;
+    const y = el.scrollTop, st = last.get(el) || { y, acc: 0, edge: false };
+    st.acc += Math.abs(y - st.y); st.y = y;
+    const max = el.scrollHeight - el.clientHeight;
+    const atEdge = max > 0 && (y <= 0 || y >= max - 1);
+    if (atEdge && !st.edge) { vibrate(HAPTIC.edge); lastBuzz = now; st.acc = 0; }
+    else if (st.acc >= 88 && now - lastBuzz > 80) { vibrate(HAPTIC.tick); lastBuzz = now; st.acc = 0; }
+    st.edge = atEdge; last.set(el, st);
+  }, { capture: true, passive: true });
+})();
 document.addEventListener('pointerdown', (e) => {
   // first touch on an unset slider records the default value too
   const r = e.target.closest('input[data-mind].unset');
@@ -1003,6 +1077,14 @@ window.addEventListener('offline', () => { if (lsGet(LS_TOKEN)) sync.set('offlin
   render();
   sync.run();
   if ('serviceWorker' in navigator && location.protocol !== 'file:') {
-    navigator.serviceWorker.register('sw.js').catch(() => {});
+    const hadController = !!navigator.serviceWorker.controller;
+    navigator.serviceWorker.register('sw.js').then((reg) => reg.update()).catch(() => {});
+    // a new version took over: reload right away if the app just opened, otherwise offer it
+    let reloaded = false;
+    navigator.serviceWorker.addEventListener('controllerchange', () => {
+      if (!hadController || reloaded) return;
+      if (performance.now() < 15000 && !sheetOpen) { reloaded = true; location.reload(); }
+      else toast('גרסה חדשה מוכנה', { label: 'רענן', fn: () => location.reload() });
+    });
   }
 })();
