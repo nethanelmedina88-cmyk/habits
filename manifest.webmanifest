@@ -1,0 +1,25 @@
+{
+  "name": "מעקב הרגלים",
+  "short_name": "הרגלים",
+  "description": "מעקב הרגלים אישי עם שמירה בענן",
+  "lang": "he",
+  "dir": "rtl",
+  "id": "./",
+  "start_url": "./#today",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#0B0D1A",
+  "theme_color": "#0B0D1A",
+  "categories": ["health", "lifestyle", "productivity"],
+  "icons": [
+    { "src": "icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
+    { "src": "icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" },
+    { "src": "maskable-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+  ],
+  "shortcuts": [
+    { "name": "סימון היום", "short_name": "היום", "url": "./#today", "icons": [{ "src": "icon-192.png", "sizes": "192x192" }] },
+    { "name": "תצוגת חודש", "short_name": "חודש", "url": "./#month", "icons": [{ "src": "icon-192.png", "sizes": "192x192" }] },
+    { "name": "ניתוח", "short_name": "ניתוח", "url": "./#stats", "icons": [{ "src": "icon-192.png", "sizes": "192x192" }] }
+  ]
+}

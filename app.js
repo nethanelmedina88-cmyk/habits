@@ -1,0 +1,958 @@
+/* Habit tracker PWA: local-first, synced to a private GitHub Gist. No build step, no dependencies. */
+'use strict';
+
+const APP_VERSION = '1.0.0';
+const LS_STATE = 'hp.state.v1';
+const LS_TOKEN = 'hp.token';
+const LS_GIST = 'hp.gist';
+const LS_LOGIN = 'hp.login';
+const LS_LAST = 'hp.lastSync';
+const GIST_FILE = 'habit-tracker-data.json';
+const GH = 'https://api.github.com';
+const TOKEN_URL = 'https://github.com/settings/tokens/new?scopes=gist&description=Habit%20Tracker';
+
+// Colours from the spreadsheet: week band colours + task-tracker day colours
+const WEEK_COLORS = ['#5B45F0', '#3E8EF7', '#35C6C0', '#F2508E', '#2FD49A'];
+const DAY_COLORS = ['#6C4EF5', '#3E8EF7', '#35C6C0', '#2FD49A', '#A3D12F', '#F4C430', '#F59A3C'];
+const PALETTE = ['#5B45F0', '#3E8EF7', '#35C6C0', '#F2508E', '#2FD49A', '#A3D12F', '#F4C430', '#F59A3C'];
+const STATUS = { bad: '#F2545B', mid: '#F4C430', good: '#3DD6B0' };
+const SERIES = { mood: '#7B7BFF', motivation: '#22A39E', progress: '#3DD6B0' }; // validated for the dark surface
+
+const DAY_LETTERS = ['א', 'ב', 'ג', 'ד', 'ה', 'ו', 'ש'];
+const DAY_NAMES = ['ראשון', 'שני', 'שלישי', 'רביעי', 'חמישי', 'שישי', 'שבת'];
+const MONTHS = ['ינואר', 'פברואר', 'מרץ', 'אפריל', 'מאי', 'יוני', 'יולי', 'אוגוסט', 'ספטמבר', 'אוקטובר', 'נובמבר', 'דצמבר'];
+
+const LIBRARY = [
+  { group: 'בוקר', items: [['השכמה ב-05:00', '⏰'], ['סידור המיטה', '🛏️'], ['תכנון היום', '📅'], ['כוס מים על הבוקר', '🥛']] },
+  { group: 'גוף', items: [['אימון כוח', '💪'], ['ריצה', '🏃'], ['10,000 צעדים', '👟'], ['מתיחות', '🤸'], ['מקלחת קרה', '🚿'], ['שינה לפני 23:00', '😴']] },
+  { group: 'תזונה', items: [['3 ליטר מים', '💧'], ['בלי סוכר', '🍬'], ['אוכל ביתי', '🥗'], ['בלי אלכוהול', '🍷'], ['חלבון בכל ארוחה', '🍗']] },
+  { group: 'נפש ורוח', items: [['תפילה', '🙏'], ['מדיטציה', '🧘'], ['כתיבת יומן', '📒'], ['הכרת תודה', '🙌'], ['פרשת שבוע', '📜']] },
+  { group: 'למידה ועבודה', items: [['קריאה 20 דקות', '📖'], ['עבודה על פרויקט צד', '💸'], ['עבודה עמוקה 90 דקות', '🎯'], ['מעקב תקציב', '💰'], ['למידת מיומנות חדשה', '🧠']] },
+  { group: 'דיגיטל', items: [['ניתוק מרשתות', '📵'], ['בלי מסך לפני שינה', '🌙'], ['תיבת מייל ריקה', '📥']] },
+];
+const EMOJIS = ['⏰', '💪', '🏃', '👟', '🤸', '🚿', '😴', '💧', '🥗', '🍬', '🍷', '🍗', '🙏', '🧘', '📒', '🙌', '📜', '📖', '💸', '🎯',
+  '💰', '🧠', '📵', '🌙', '📥', '📅', '🛏️', '🥛', '🦁', '🔥', '⚡', '🏋️', '🚴', '🏊', '🧬', '🎓', '✍️', '🎸', '🌿', '☀️',
+  '🧹', '👨‍👩‍👧', '❤️', '🦷', '💊', '🚭', '🧊', '✅'];
+
+/* ------------------------------------------------------------------ dates */
+const pad = (n) => String(n).padStart(2, '0');
+const keyOf = (d) => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+const parseKey = (k) => { const [y, m, d] = k.split('-').map(Number); return new Date(y, m - 1, d); };
+const addDays = (k, n) => { const d = parseKey(k); d.setDate(d.getDate() + n); return keyOf(d); };
+const dow = (k) => parseKey(k).getDay();
+const todayKey = () => keyOf(new Date());
+const weekStart = (k) => addDays(k, -dow(k));
+const daysIn = (y, m) => new Date(y, m + 1, 0).getDate();
+const dayNum = (k) => Number(k.slice(8));
+
+/* ------------------------------------------------------------------ helpers */
+const $ = (s, el = document) => el.querySelector(s);
+const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+const now = () => Date.now();
+const uid = () => 'h' + now().toString(36) + Math.random().toString(36).slice(2, 7);
+const pctText = (p) => (p == null ? '–' : Math.round(p * 100) + '%');
+const statusColor = (p) => (p == null ? 'var(--line)' : p < 0.4 ? STATUS.bad : p < 0.7 ? STATUS.mid : STATUS.good);
+const statusClass = (p) => (p == null ? '' : p < 0.4 ? 'pct-lo' : p < 0.7 ? 'pct-mid' : 'pct-hi');
+const reduceMotion = () => window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+const vibrate = (ms) => { try { navigator.vibrate && navigator.vibrate(ms); } catch (e) { /* ignore */ } };
+const lsGet = (k) => { try { return localStorage.getItem(k); } catch (e) { return null; } };
+const lsSet = (k, v) => { try { v == null ? localStorage.removeItem(k) : localStorage.setItem(k, v); } catch (e) { /* ignore */ } };
+
+function stableStringify(v) {
+  if (Array.isArray(v)) return '[' + v.map(stableStringify).join(',') + ']';
+  if (v && typeof v === 'object') return '{' + Object.keys(v).sort().map((k) => JSON.stringify(k) + ':' + stableStringify(v[k])).join(',') + '}';
+  return JSON.stringify(v);
+}
+
+/* ------------------------------------------------------------------ state */
+const blank = () => ({ v: 1, habits: {}, log: {}, mind: {}, profile: { name: '', t: 0 } });
+
+function normalize(o) {
+  const s = blank();
+  if (!o || typeof o !== 'object') return s;
+  if (o.habits && typeof o.habits === 'object') {
+    for (const [id, h] of Object.entries(o.habits)) {
+      if (!h || typeof h !== 'object') continue;
+      s.habits[id] = {
+        id, name: String(h.name || '').slice(0, 60), emoji: h.emoji || '✅', color: h.color || PALETTE[0],
+        days: Array.isArray(h.days) && h.days.length ? h.days.filter((d) => d >= 0 && d <= 6) : [0, 1, 2, 3, 4, 5, 6],
+        order: Number(h.order) || 0, start: h.start || todayKey(), deleted: !!h.deleted, t: Number(h.t) || 0,
+      };
+    }
+  }
+  if (o.log && typeof o.log === 'object') s.log = o.log;
+  if (o.mind && typeof o.mind === 'object') s.mind = o.mind;
+  if (o.profile && typeof o.profile === 'object') s.profile = { name: String(o.profile.name || ''), t: Number(o.profile.t) || 0 };
+  return s;
+}
+
+function pickNewer(a, b) {
+  if (!a) return b;
+  if (!b) return a;
+  return (Number(b.t) || 0) > (Number(a.t) || 0) ? b : a;
+}
+
+/** Last-writer-wins per record, so two devices never overwrite each other's separate changes. */
+function mergeStates(a, b) {
+  a = normalize(a); b = normalize(b);
+  const out = blank();
+  for (const id of new Set([...Object.keys(a.habits), ...Object.keys(b.habits)])) out.habits[id] = pickNewer(a.habits[id], b.habits[id]);
+  for (const dk of new Set([...Object.keys(a.log), ...Object.keys(b.log)])) {
+    const la = a.log[dk] || {}, lb = b.log[dk] || {};
+    out.log[dk] = {};
+    for (const hid of new Set([...Object.keys(la), ...Object.keys(lb)])) out.log[dk][hid] = pickNewer(la[hid], lb[hid]);
+  }
+  for (const dk of new Set([...Object.keys(a.mind), ...Object.keys(b.mind)])) {
+    const ma = a.mind[dk] || {}, mb = b.mind[dk] || {};
+    out.mind[dk] = {};
+    for (const f of new Set([...Object.keys(ma), ...Object.keys(mb)])) out.mind[dk][f] = pickNewer(ma[f], mb[f]);
+  }
+  out.profile = pickNewer(a.profile, b.profile);
+  return out;
+}
+
+let S = (() => { try { return normalize(JSON.parse(lsGet(LS_STATE) || 'null')); } catch (e) { return blank(); } })();
+
+function persistLocal() { lsSet(LS_STATE, JSON.stringify(S)); }
+function save() { persistLocal(); scheduleSync(); }
+
+const habitsList = () => Object.values(S.habits).filter((h) => !h.deleted).sort((a, b) => a.order - b.order || a.t - b.t);
+const scheduled = (h, dk) => !h.deleted && dk >= h.start && h.days.includes(dow(dk));
+const isDone = (hid, dk) => !!(S.log[dk] && S.log[dk][hid] && S.log[dk][hid].v);
+const mindVal = (dk, f) => (S.mind[dk] && S.mind[dk][f] && S.mind[dk][f].v) || null;
+
+function setDone(hid, dk, v) {
+  S.log[dk] = S.log[dk] || {};
+  S.log[dk][hid] = { v: v ? 1 : 0, t: now() };
+  save();
+}
+function setMind(dk, f, v) {
+  S.mind[dk] = S.mind[dk] || {};
+  S.mind[dk][f] = { v, t: now() };
+  save();
+}
+function addHabit({ name, emoji, color, days }) {
+  const list = habitsList();
+  const id = uid();
+  S.habits[id] = {
+    id, name: name.trim().slice(0, 60), emoji: emoji || '✅', color: color || PALETTE[list.length % PALETTE.length],
+    days: days && days.length ? days : [0, 1, 2, 3, 4, 5, 6], order: list.length ? Math.max(...list.map((h) => h.order)) + 1 : 0,
+    start: todayKey(), deleted: false, t: now(),
+  };
+  return id;
+}
+function updateHabit(id, patch) { S.habits[id] = { ...S.habits[id], ...patch, t: now() }; save(); }
+
+/* ------------------------------------------------------------------ stats */
+function dayStat(dk) {
+  let total = 0, done = 0;
+  for (const h of habitsList()) if (scheduled(h, dk)) { total++; if (isDone(h.id, dk)) done++; }
+  return { total, done, pct: total ? done / total : null };
+}
+function mindScore(dk) {
+  const vals = ['mood', 'motivation'].map((f) => mindVal(dk, f)).filter((v) => v != null);
+  return vals.length ? vals.reduce((a, b) => a + b, 0) / (vals.length * 10) : null;
+}
+function streak(h, upTo = todayKey()) {
+  let n = 0, dk = upTo;
+  for (let i = 0; i < 1500 && dk >= h.start; i++, dk = addDays(dk, -1)) {
+    if (!h.days.includes(dow(dk))) continue;
+    if (isDone(h.id, dk)) n++;
+    else if (dk === todayKey()) continue;
+    else break;
+  }
+  return n;
+}
+function monthStats(y, m) {
+  const dim = daysIn(y, m), tk = todayKey(), habits = habitsList();
+  const days = [];
+  for (let d = 1; d <= dim; d++) {
+    const dk = keyOf(new Date(y, m, d));
+    const st = dk > tk ? { total: 0, done: 0, pct: null } : dayStat(dk);
+    days.push({ d, dk, future: dk > tk, ...st, mood: mindVal(dk, 'mood'), motivation: mindVal(dk, 'motivation'), mind: mindScore(dk) });
+  }
+  const per = habits.map((h) => {
+    let sched = 0, done = 0;
+    for (const x of days) if (!x.future && scheduled(h, x.dk)) { sched++; if (isDone(h.id, x.dk)) done++; }
+    return { h, sched, done, pct: sched ? done / sched : null };
+  });
+  const sched = per.reduce((a, p) => a + p.sched, 0), done = per.reduce((a, p) => a + p.done, 0);
+  const perfect = days.filter((x) => x.total > 0 && x.done === x.total).length;
+  const weeks = [0, 1, 2, 3, 4].map((w) => {
+    const ds = days.slice(w * 7, w * 7 + 7);
+    if (!ds.length) return null;
+    const sc = ds.map((x) => x.mind).filter((v) => v != null);
+    return { w, from: ds[0].d, to: ds[ds.length - 1].d, score: sc.length ? sc.reduce((a, b) => a + b, 0) / sc.length : null };
+  }).filter(Boolean);
+  const byDow = [0, 1, 2, 3, 4, 5, 6].map((wd) => {
+    const ds = days.filter((x) => !x.future && x.total && dow(x.dk) === wd);
+    return ds.length ? ds.reduce((a, x) => a + x.pct, 0) / ds.length : null;
+  });
+  return { y, m, dim, days, per, sched, done, pct: sched ? done / sched : null, perfect, weeks, byDow, habits };
+}
+
+/* ------------------------------------------------------------------ UI state */
+const ui = {
+  tab: 'today',
+  day: todayKey(),
+  month: (() => { const d = new Date(); return { y: d.getFullYear(), m: d.getMonth() }; })(),
+  showOff: false,
+  heroPct: 0,
+  pick: new Set(), // onboarding selection
+  anim: true,
+  lastToday: todayKey(),
+};
+const view = $('#view');
+const charts = new Map();
+
+/* ------------------------------------------------------------------ icons */
+const ICON = {
+  prev: '<svg viewBox="0 0 24 24"><path d="M9 6l6 6-6 6"/></svg>',   // RTL: "back" points right
+  next: '<svg viewBox="0 0 24 24"><path d="M15 6l-6 6 6 6"/></svg>',
+  up: '<svg viewBox="0 0 24 24"><path d="M6 15l6-6 6 6"/></svg>',
+  down: '<svg viewBox="0 0 24 24"><path d="M6 9l6 6 6-6"/></svg>',
+  edit: '<svg viewBox="0 0 24 24"><path d="M4 20h4L19 9l-4-4L4 16v4z"/><path d="M13.5 6.5l4 4"/></svg>',
+  plus: '<svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg>',
+  check: '<svg viewBox="0 0 24 24"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg>',
+  cloud: '<svg viewBox="0 0 24 24"><path d="M7 18h10a4 4 0 0 0 .6-7.95A6 6 0 0 0 6.1 9.2 4.5 4.5 0 0 0 7 18z"/></svg>',
+  down2: '<svg viewBox="0 0 24 24"><path d="M12 4v11M7 10l5 5 5-5M5 20h14"/></svg>',
+  up2: '<svg viewBox="0 0 24 24"><path d="M12 20V9M7 14l5-5 5 5M5 4h14"/></svg>',
+  sync: '<svg viewBox="0 0 24 24"><path d="M20 12a8 8 0 0 1-14 5.3M4 12a8 8 0 0 1 14-5.3"/><path d="M18 3v4h-4M6 21v-4h4"/></svg>',
+};
+
+function miniRing(pct, color, size = 30) {
+  const r = size / 2 - 3, c = 2 * Math.PI * r, p = pct == null ? 0 : pct;
+  return `<svg viewBox="0 0 ${size} ${size}" aria-hidden="true"><circle cx="${size / 2}" cy="${size / 2}" r="${r}" fill="none" stroke="var(--line)" stroke-width="3.5"/>
+    <circle cx="${size / 2}" cy="${size / 2}" r="${r}" fill="none" stroke="${color}" stroke-width="3.5" stroke-linecap="round"
+      stroke-dasharray="${c}" stroke-dashoffset="${c * (1 - p)}" transform="rotate(-90 ${size / 2} ${size / 2})" ${p === 0 ? 'stroke-opacity="0"' : ''}/>
+    ${p >= 1 ? `<circle cx="${size / 2}" cy="${size / 2}" r="${r - 5}" fill="${color}"/>` : ''}</svg>`;
+}
+
+function daysSummary(days) {
+  const s = [...days].sort();
+  if (s.length === 7) return 'כל יום';
+  if (s.join() === '0,1,2,3,4') return 'ימים א–ה';
+  if (s.join() === '0,1,2,3,4,5') return 'ימים א–ו';
+  return 'ימים ' + s.map((d) => DAY_LETTERS[d]).join(' ');
+}
+
+/* ------------------------------------------------------------------ header */
+function renderHeader() {
+  const h = new Date().getHours();
+  const hi = h >= 5 && h < 12 ? 'בוקר טוב' : h >= 12 && h < 17 ? 'צהריים טובים' : h >= 17 && h < 21 ? 'ערב טוב' : 'לילה טוב';
+  const name = (S.profile.name || '').trim();
+  $('#hello').textContent = name ? `${hi}, ${name}` : hi;
+  const d = new Date();
+  $('#todayLabel').textContent = `יום ${DAY_NAMES[d.getDay()]} · ${d.getDate()} ב${MONTHS[d.getMonth()]}`;
+}
+
+/* ------------------------------------------------------------------ TODAY */
+function heroMessage(st) {
+  if (!st.total) return ['אין הרגלים ליום הזה', 'יום חופשי מהרשימה. אפשר לנוח.'];
+  if (st.done === 0) return ['יום חדש. צעד ראשון.', 'בחר הרגל אחד וסמן אותו עכשיו.'];
+  if (st.pct < 0.5) return ['התחלה טובה. ממשיכים.', `נשארו ${st.total - st.done} הרגלים להיום.`];
+  if (st.pct < 1) return ['כמעט שם.', `עוד ${st.total - st.done} ${st.total - st.done === 1 ? 'הרגל' : 'הרגלים'} ליום מושלם.`];
+  return ['יום מושלם 🔥', 'כל ההרגלים של היום בוצעו.'];
+}
+
+function renderToday() {
+  const habits = habitsList();
+  if (!habits.length) return renderOnboarding();
+  const tk = todayKey(), dk = ui.day;
+  const ws = weekStart(dk);
+  const pills = [0, 1, 2, 3, 4, 5, 6].map((i) => {
+    const k = addDays(ws, i), st = k > tk ? { pct: null } : dayStat(k);
+    return `<button class="day-pill ${k === tk ? 'is-today' : ''}" data-action="pick-day" data-day="${k}" ${k > tk ? 'disabled' : ''}
+      ${k === dk ? 'aria-current="date"' : ''} aria-label="יום ${DAY_NAMES[i]} ${dayNum(k)}, ${pctText(st.pct)}">
+      <span class="dname">${DAY_LETTERS[i]}</span>${miniRing(st.pct, DAY_COLORS[i])}<span class="dnum">${dayNum(k)}</span></button>`;
+  }).join('');
+  const st = dayStat(dk);
+  const [title, sub] = heroMessage(st);
+  const R = 56, C = 2 * Math.PI * R;
+  const from = ui.heroPct, to = st.pct || 0;
+  const isToday = dk === tk;
+  const dayTitle = isToday ? 'ההרגלים של היום' : `יום ${DAY_NAMES[dow(dk)]}, ${dayNum(dk)} ב${MONTHS[parseKey(dk).getMonth()]}`;
+
+  const on = habits.filter((h) => scheduled(h, dk));
+  const off = habits.filter((h) => !scheduled(h, dk));
+  const card = (h, disabled) => {
+    const done = isDone(h.id, dk), sk = streak(h, dk);
+    const dots = [6, 5, 4, 3, 2, 1, 0].map((i) => {
+      const k = addDays(dk, -i);
+      const cls = !scheduled(h, k) ? 'off-day' : isDone(h.id, k) ? 'on' : '';
+      return `<i class="${cls}"></i>`;
+    }).join('');
+    return `<button class="habit" style="--c:${h.color}" data-action="toggle" data-id="${h.id}" aria-pressed="${done}" ${disabled ? 'disabled' : ''}>
+      <span class="emoji" aria-hidden="true">${esc(h.emoji)}</span>
+      <span class="body"><span class="name">${esc(h.name)}</span>
+        <span class="meta">${sk ? `<span class="streak">🔥 <span class="num">${sk}</span> ${sk === 1 ? 'יום' : 'ימים'}</span>` : '<span>עוד אין רצף</span>'}
+        <span class="dots" aria-label="7 הימים האחרונים">${dots}</span></span></span>
+      <span class="check" aria-hidden="true">${ICON.check}</span></button>`;
+  };
+
+  const mood = mindVal(dk, 'mood'), mot = mindVal(dk, 'motivation'), ms = mindScore(dk);
+  const slider = (f, label, v, color) => `<div class="mind-row" style="--c:${color}">
+      <label for="mind-${f}">${label}</label>
+      <input type="range" id="mind-${f}" min="1" max="10" step="1" value="${v || 5}" class="${v ? '' : 'unset'}" data-mind="${f}"
+        style="--p:${v ? ((v - 1) / 9) * 100 : 0}%" aria-valuetext="${v ? v + ' מתוך 10' : 'לא נבחר'}">
+      <span class="mind-val ${v ? '' : 'empty'}" id="mv-${f}">${v ? `<span class="num">${v}</span>` : '–'}</span></div>`;
+
+  view.innerHTML = `<section class="fade-in">
+    <div class="week-nav">
+      <button class="icon-btn" data-action="week" data-dir="-1" aria-label="השבוע הקודם">${ICON.prev}</button>
+      <div class="week-strip">${pills}</div>
+      <button class="icon-btn" data-action="week" data-dir="1" aria-label="השבוע הבא" ${addDays(ws, 7) > tk ? 'disabled' : ''}>${ICON.next}</button>
+    </div>
+    <div class="hero">
+      <div class="hero-ring" role="img" aria-label="בוצעו ${st.done} מתוך ${st.total}">
+        <svg viewBox="0 0 132 132"><defs><linearGradient id="hg" x1="0" y1="0" x2="1" y2="1">
+          <stop offset="0" stop-color="#5B45F0"/><stop offset=".5" stop-color="#3E8EF7"/><stop offset="1" stop-color="#2FD49A"/></linearGradient></defs>
+          <circle class="ring-bg" cx="66" cy="66" r="${R}" fill="none" stroke-width="12"/>
+          <circle class="ring-fg" id="heroFg" cx="66" cy="66" r="${R}" fill="none" stroke="url(#hg)" stroke-width="12" stroke-linecap="round"
+            stroke-dasharray="${C}" stroke-dashoffset="${C * (1 - from)}" ${from === 0 && to === 0 ? 'stroke-opacity="0"' : ''}/></svg>
+        <div class="hero-center"><div class="hero-pct num">${pctText(st.pct)}</div><div class="hero-sub"><span class="num">${st.done}/${st.total}</span> בוצעו</div></div>
+      </div>
+      <div class="hero-text"><h1>${title}</h1><p>${sub}</p>${isToday ? '' : `<p class="small" style="margin-top:6px">עורך יום שעבר. <button class="link" style="background:none;border:0;padding:0" data-action="go-today">חזרה להיום</button></p>`}</div>
+    </div>
+    <div class="section-title"><h2>${dayTitle}</h2><span class="hint">הקש כדי לסמן</span></div>
+    <div class="habit-list">${on.map((h) => card(h, false)).join('') || '<div class="card small">אין הרגלים מתוכננים ליום הזה.</div>'}</div>
+    ${off.length ? `<button class="offday-toggle" data-action="toggle-off" aria-expanded="${ui.showOff}">${ui.showOff ? 'הסתר' : 'הצג'} ${off.length} ${off.length === 1 ? 'הרגל שלא מתוכנן' : 'הרגלים שלא מתוכננים'} ליום הזה</button>
+      ${ui.showOff ? `<div class="habit-list offday-list" style="margin-top:10px">${off.map((h) => card(h, true)).join('')}</div>` : ''}` : ''}
+    <div class="section-title"><h2>מצב מנטלי</h2><span class="hint">1 עד 10</span></div>
+    <div class="card" style="padding:6px 16px 12px">
+      ${slider('mood', 'מצב רוח', mood, SERIES.mood)}
+      ${slider('motivation', 'מוטיבציה', mot, SERIES.motivation)}
+      <div class="mind-score"><span>ציון מיינדסט ליום</span><b id="mindScore">${pctText(ms)}</b></div>
+    </div>
+  </section>`;
+  ui.heroPct = to;
+  requestAnimationFrame(() => requestAnimationFrame(() => {
+    const fg = $('#heroFg');
+    if (fg) { fg.setAttribute('stroke-dashoffset', C * (1 - to)); if (to > 0) fg.removeAttribute('stroke-opacity'); }
+  }));
+}
+
+function renderOnboarding() {
+  const groups = LIBRARY.map((g) => `<div class="lib-group"><h3>${g.group}</h3><div class="chips">${g.items.map(([n, e]) => {
+    const key = n + '|' + e, on = ui.pick.has(key);
+    return `<button class="chip" data-action="pick" data-key="${esc(key)}" aria-pressed="${on}"><span aria-hidden="true">${e}</span>${esc(n)}<span class="plus" aria-hidden="true">${on ? '✓' : '+'}</span></button>`;
+  }).join('')}</div></div>`).join('');
+  view.innerHTML = `<section class="fade-in">
+    <div class="card empty"><div class="big" aria-hidden="true">🎯</div><h2>בוא נבנה את השגרה שלך</h2>
+      <p>בחר הרגלים מהרשימה. תמיד אפשר לשנות, להוסיף ולערוך אחר כך.</p>
+      <button class="btn ghost block" data-action="open-settings">${ICON.cloud} כבר יש לי נתונים בענן</button></div>
+    ${groups}
+    <div class="sticky-cta"><button class="btn block" data-action="start" ${ui.pick.size ? '' : 'disabled'}>${ui.pick.size ? `התחל עם ${ui.pick.size} הרגלים` : 'בחר לפחות הרגל אחד'}</button></div>
+    <p class="small" style="text-align:center;margin-top:12px">רוצה הרגל משלך? <button class="link" style="background:none;border:0;padding:0" data-action="new-habit">צור הרגל חדש</button></p>
+  </section>`;
+}
+
+/* ------------------------------------------------------------------ MONTH */
+function monthNav() {
+  const { y, m } = ui.month, d = new Date();
+  const atNow = y === d.getFullYear() && m === d.getMonth();
+  return `<div class="month-head">
+    <button class="icon-btn" data-action="month" data-dir="-1" aria-label="החודש הקודם">${ICON.prev}</button>
+    <div class="month-title">${MONTHS[m]} <span class="num">${y}</span></div>
+    <button class="icon-btn" data-action="month" data-dir="1" aria-label="החודש הבא" ${atNow ? 'disabled' : ''}>${ICON.next}</button></div>`;
+}
+
+function renderMonth() {
+  const ms = monthStats(ui.month.y, ui.month.m);
+  const tk = todayKey();
+  if (!ms.habits.length) { view.innerHTML = `<section class="fade-in">${monthNav()}<div class="card empty" style="margin-top:14px"><p>עוד אין הרגלים.</p><button class="btn" data-action="tab" data-tab="habits">הוסף הרגלים</button></div></section>`; return; }
+  const wk = (d) => Math.min(4, Math.floor((d - 1) / 7));
+  const bands = [0, 1, 2, 3, 4].map((w) => {
+    const n = ms.days.filter((x) => wk(x.d) === w).length;
+    return n ? `<th class="wk" colspan="${n}" style="background:${WEEK_COLORS[w]}">שבוע ${w + 1}</th>` : '';
+  }).join('');
+  const dl = ms.days.map((x) => `<th class="dl ${x.dk === tk ? 'today-col' : ''}" style="background:${WEEK_COLORS[wk(x.d)]}">${DAY_LETTERS[dow(x.dk)]}</th>`).join('');
+  const dn = ms.days.map((x) => `<th class="dn ${x.dk === tk ? 'today-col' : ''}" style="background:${WEEK_COLORS[wk(x.d)]}" ${x.dk === tk ? 'id="todayCol"' : ''}>
+      <button data-action="open-day" data-day="${x.dk}" ${x.future ? 'disabled' : ''} aria-label="פתח את יום ${x.d}">${x.d}</button></th>`).join('');
+  const rows = ms.habits.map((h) => `<tr><th class="sticky hname" scope="row"><span aria-hidden="true">${esc(h.emoji)}</span> ${esc(h.name)}</th>${ms.days.map((x) => {
+    const wc = WEEK_COLORS[wk(x.d)], sch = scheduled(h, x.dk), done = isDone(h.id, x.dk);
+    const dis = x.future || x.dk < h.start || !sch;
+    const lbl = `${h.name}, ${x.d} ב${MONTHS[ui.month.m]}: ${!sch ? 'לא מתוכנן' : done ? 'בוצע' : 'לא בוצע'}`;
+    return `<td class="cell ${x.d % 7 === 1 && x.d > 1 ? 'wk-start' : ''}"><button class="cellbtn ${!sch && x.dk >= h.start ? 'offday' : ''}" style="--wc:${wc}"
+      data-action="cell" data-id="${h.id}" data-day="${x.dk}" aria-pressed="${done}" ${dis ? 'disabled' : ''} aria-label="${esc(lbl)}"><i></i></button></td>`;
+  }).join('')}</tr>`).join('');
+  const foot = (label, fn) => `<tr><th class="sticky" scope="row">${label}</th>${ms.days.map(fn).join('')}</tr>`;
+  const kpi = `<div class="kpis">
+    <div class="kpi"><div class="k-label">הרגלים פעילים</div><div class="k-val num">${ms.habits.length}</div></div>
+    <div class="kpi"><div class="k-label">סימונים החודש</div><div class="k-val num">${ms.done}</div></div>
+    <div class="kpi"><div class="k-label">התקדמות עד היום</div><div class="k-val num">${pctText(ms.pct)}</div>
+      <div class="bar"><i style="width:${(ms.pct || 0) * 100}%;background:${statusColor(ms.pct)}"></i></div></div>
+    <div class="kpi"><div class="k-label">ימים מושלמים</div><div class="k-val num">${ms.perfect}</div></div></div>`;
+  view.innerHTML = `<section class="fade-in">${monthNav()}${kpi}
+    <div class="grid-wrap" id="gridWrap"><table class="grid" aria-label="טבלת הרגלים חודשית">
+      <thead><tr><th class="sticky" rowspan="3" style="font-size:15px;font-weight:800">ההרגלים שלי</th>${bands}</tr><tr>${dl}</tr><tr>${dn}</tr></thead>
+      <tbody>${rows}</tbody>
+      <tfoot>
+        ${foot('התקדמות', (x) => `<td class="${statusClass(x.pct)}">${x.future || x.pct == null ? '' : Math.round(x.pct * 100) + '%'}</td>`)}
+        ${foot('מצב רוח', (x) => `<td>${x.mood || ''}</td>`)}
+        ${foot('מוטיבציה', (x) => `<td>${x.motivation || ''}</td>`)}
+      </tfoot></table></div>
+    <p class="grid-help">הקש על משבצת כדי לסמן או לבטל. הקש על מספר יום כדי לפתוח אותו. משבצת מנוקדת: הרגל שלא מתוכנן ליום הזה.</p>
+  </section>`;
+  const tc = $('#todayCol'), wrap = $('#gridWrap');
+  if (tc && wrap && ui.gridScroll == null) requestAnimationFrame(() => {
+    const d = tc.getBoundingClientRect().left - wrap.getBoundingClientRect().left - 8;
+    wrap.scrollBy({ left: d });
+  });
+  if (wrap && ui.gridScroll != null) { wrap.scrollLeft = ui.gridScroll; ui.gridScroll = null; }
+}
+
+/* ------------------------------------------------------------------ charts (hand-built SVG) */
+function chartWidth() { return Math.max(260, Math.min(528, view.clientWidth - 32) - 26); }
+
+function xTicks(points, x, H) {
+  const n = points.length;
+  return points.map((p, i) => (p.d % 7 === 1 || (i === n - 1 && p.d % 7 >= 4)) ? `<text class="axis-label" x="${x(i)}" y="${H - 6}" text-anchor="middle">${p.d}</text>` : '').join('');
+}
+
+function areaChart(id, points) {
+  // points: [{d, dk, v (0..1) | null}]
+  const W = chartWidth(), H = 170, L = 34, Rr = 10, T = 10, B = 24, pw = W - L - Rr, ph = H - T - B;
+  const n = points.length, x = (i) => L + (n <= 1 ? pw / 2 : (i / (n - 1)) * pw), y = (v) => T + ph * (1 - v);
+  const valid = points.map((p, i) => ({ ...p, i })).filter((p) => p.v != null);
+  let line = '', area = '';
+  if (valid.length) {
+    line = valid.map((p, k) => `${k ? 'L' : 'M'}${x(p.i).toFixed(1)},${y(p.v).toFixed(1)}`).join(' ');
+    area = `${line} L${x(valid[valid.length - 1].i).toFixed(1)},${y(0)} L${x(valid[0].i).toFixed(1)},${y(0)} Z`;
+  }
+  const grid = [0, 0.25, 0.5, 0.75, 1].map((g) => `<line class="gridline" x1="${L}" x2="${W - Rr}" y1="${y(g)}" y2="${y(g)}"/>
+    <text class="axis-label" x="${L - 6}" y="${y(g) + 4}" text-anchor="end">${g * 100}%</text>`).join('');
+  const ticks = xTicks(points, x, H);
+  charts.set(id, { W, H, L, T, pw, ph, n, x, y, series: [{ key: 'v', name: 'התקדמות', color: SERIES.progress, fmt: pctText }], points });
+  return `<div class="chart" data-chart="${id}">
+    <svg viewBox="0 0 ${W} ${H}" role="img" aria-label="גרף התקדמות יומית באחוזים" style="touch-action:pan-y">
+      <defs><linearGradient id="ag-${id}" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="${SERIES.progress}" stop-opacity=".45"/>
+        <stop offset="1" stop-color="${SERIES.progress}" stop-opacity=".02"/></linearGradient></defs>
+      ${grid}${ticks}
+      ${valid.length ? `<path d="${area}" fill="url(#ag-${id})"/><path d="${line}" fill="none" stroke="${SERIES.progress}" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>` : ''}
+      ${valid.length === 1 ? `<circle cx="${x(valid[0].i)}" cy="${y(valid[0].v)}" r="4" fill="${SERIES.progress}"/>` : ''}
+      <g class="hover" style="display:none"><line class="crosshair" y1="${T}" y2="${T + ph}"/></g>
+      <rect x="${L}" y="${T}" width="${pw}" height="${ph}" fill="transparent" class="hit"/>
+    </svg><div class="tooltip" role="presentation"></div></div>`;
+}
+
+function lineChart(id, points, series, maxV) {
+  // series: [{key, name, color}] values in points[i][key] (null = gap)
+  const W = chartWidth(), H = 180, L = 26, Rr = 66, T = 12, B = 24, pw = W - L - Rr, ph = H - T - B;
+  const n = points.length, x = (i) => L + (n <= 1 ? pw / 2 : (i / (n - 1)) * pw), y = (v) => T + ph * (1 - v / maxV);
+  const grid = [0, 2, 4, 6, 8, 10].map((g) => `<line class="gridline" x1="${L}" x2="${L + pw}" y1="${y(g)}" y2="${y(g)}"/>
+    <text class="axis-label" x="${L - 6}" y="${y(g) + 4}" text-anchor="end">${g}</text>`).join('');
+  const ticks = xTicks(points, x, H);
+  const ends = [];
+  const paths = series.map((s) => {
+    let d = '', pen = false, last = null, singles = [];
+    points.forEach((p, i) => {
+      const v = p[s.key];
+      if (v == null) { pen = false; return; }
+      const prevNull = i === 0 || points[i - 1][s.key] == null, nextNull = i === n - 1 || points[i + 1][s.key] == null;
+      if (prevNull && nextNull) singles.push(i);
+      d += `${pen ? 'L' : 'M'}${x(i).toFixed(1)},${y(v).toFixed(1)} `; pen = true; last = i;
+    });
+    if (last != null) ends.push({ s, yy: y(points[last][s.key]), xx: x(last) });
+    return `<path d="${d}" fill="none" stroke="${s.color}" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>` +
+      singles.map((i) => `<circle cx="${x(i)}" cy="${y(points[i][s.key])}" r="4" fill="${s.color}" stroke="var(--panel)" stroke-width="2"/>`).join('');
+  }).join('');
+  ends.sort((a, b) => a.yy - b.yy);
+  for (let i = 1; i < ends.length; i++) if (ends[i].yy - ends[i - 1].yy < 15) ends[i].yy = ends[i - 1].yy + 15;
+  const labels = ends.map((e) => `<text class="end-label" x="${L + pw + 8}" y="${e.yy + 4}" fill="var(--text)">${e.s.name}</text>
+    <line x1="${e.xx}" x2="${L + pw + 4}" y1="${e.yy}" y2="${e.yy}" stroke="${e.s.color}" stroke-width="1" stroke-dasharray="2 3" opacity=".6"/>`).join('');
+  charts.set(id, { W, H, L, T, pw, ph, n, x, y, series: series.map((s) => ({ ...s, fmt: (v) => (v == null ? '–' : v + '/10') })), points });
+  return `<div class="chart" data-chart="${id}">
+    <svg viewBox="0 0 ${W} ${H}" role="img" aria-label="גרף מצב רוח ומוטיבציה" style="touch-action:pan-y">
+      ${grid}${ticks}${paths}${labels}
+      <g class="hover" style="display:none"><line class="crosshair" y1="${T}" y2="${T + ph}"/></g>
+      <rect x="${L}" y="${T}" width="${pw}" height="${ph}" fill="transparent" class="hit"/>
+    </svg><div class="tooltip" role="presentation"></div></div>`;
+}
+
+function wireCharts() {
+  document.querySelectorAll('.chart[data-chart]').forEach((el) => {
+    const c = charts.get(el.dataset.chart); if (!c) return;
+    const svg = $('svg', el), hover = $('.hover', el), tip = $('.tooltip', el), cross = $('.crosshair', el);
+    const show = (ev) => {
+      const r = svg.getBoundingClientRect(), sx = ((ev.clientX - r.left) / r.width) * c.W;
+      const i = Math.max(0, Math.min(c.n - 1, Math.round(((sx - c.L) / c.pw) * (c.n - 1))));
+      const p = c.points[i];
+      if (!p || p.future) { hide(); return; }
+      const xx = c.x(i);
+      cross.setAttribute('x1', xx); cross.setAttribute('x2', xx);
+      hover.querySelectorAll('circle').forEach((n) => n.remove());
+      c.series.forEach((s) => {
+        const v = p[s.key]; if (v == null) return;
+        const dot = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
+        dot.setAttribute('cx', xx); dot.setAttribute('cy', c.y(v)); dot.setAttribute('r', 5);
+        dot.setAttribute('fill', s.color); dot.setAttribute('stroke', '#0B0D1A'); dot.setAttribute('stroke-width', 2);
+        hover.appendChild(dot);
+      });
+      hover.style.display = '';
+      tip.innerHTML = `<div class="t-date">${p.d} ב${MONTHS[parseKey(p.dk).getMonth()]}, יום ${DAY_NAMES[dow(p.dk)]}</div>` +
+        c.series.map((s) => `<div class="t-row"><span><i class="sw" style="background:${s.color}"></i>${s.name}</span><b class="num">${s.fmt(p[s.key])}</b></div>`).join('');
+      const px = (xx / c.W) * r.width, tw = tip.offsetWidth || 130;
+      let left = px - tw / 2; left = Math.max(0, Math.min(r.width - tw, left));
+      tip.style.left = left + 'px'; tip.style.transform = 'none'; tip.style.top = '-8px';
+      tip.classList.add('show');
+    };
+    const hide = () => { hover.style.display = 'none'; tip.classList.remove('show'); };
+    svg.addEventListener('pointerdown', show);
+    svg.addEventListener('pointermove', show);
+    svg.addEventListener('pointerleave', hide);
+    svg.addEventListener('pointercancel', hide);
+  });
+}
+
+/* ------------------------------------------------------------------ STATS */
+function renderStats() {
+  const ms = monthStats(ui.month.y, ui.month.m);
+  if (!ms.habits.length) { view.innerHTML = `<section class="fade-in">${monthNav()}<div class="card empty" style="margin-top:14px"><p>הוסף הרגלים כדי לראות ניתוח.</p><button class="btn" data-action="tab" data-tab="habits">להרגלים</button></div></section>`; return; }
+  charts.clear();
+  const past = ms.days.filter((x) => !x.future);
+  const ranked = ms.per.filter((p) => p.pct != null).sort((a, b) => b.pct - a.pct);
+  const best = ranked[0], worst = ranked.length > 1 ? ranked[ranked.length - 1] : null;
+  const bdi = ms.byDow.reduce((bi, v, i, arr) => (v != null && (bi < 0 || v > arr[bi]) ? i : bi), -1);
+  const insight = (ico, title, val) => `<div class="card insight"><div class="ico" aria-hidden="true">${ico}</div><div><div class="i-title">${title}</div><div class="i-val">${val}</div></div></div>`;
+  const insights = [
+    best ? insight('🏆', 'ההרגל החזק החודש', `${esc(best.h.emoji)} ${esc(best.h.name)} · <span class="num">${pctText(best.pct)}</span>`) : '',
+    worst && worst.pct < best.pct ? insight('🎯', 'כדאי לשים עליו פוקוס', `${esc(worst.h.emoji)} ${esc(worst.h.name)} · <span class="num">${pctText(worst.pct)}</span>`) : '',
+    bdi >= 0 ? insight('📅', 'היום החזק בשבוע', `יום ${DAY_NAMES[bdi]} · <span class="num">${pctText(ms.byDow[bdi])}</span>`) : '',
+    insight('✨', 'ימים מושלמים החודש', `<span class="num">${ms.perfect}</span> מתוך <span class="num">${past.filter((x) => x.total).length}</span>`),
+  ].join('');
+
+  const bars = ms.per.map((p) => `<div class="bar-row"><div class="b-name">${esc(p.h.emoji)} ${esc(p.h.name)}</div>
+      <div class="b-val num">${pctText(p.pct)}</div>
+      <div class="b-track"><i style="width:${(p.pct || 0) * 100}%;background:${statusColor(p.pct)}"></i></div>
+      <div class="b-note" style="grid-column:1"><span class="num">${p.done}</span> מתוך <span class="num">${p.sched}</span> · רצף נוכחי <span class="num">${streak(p.h)}</span></div></div>`).join('');
+  const weeks = ms.weeks.map((w) => `<div class="bar-row"><div class="b-name"><span style="display:inline-block;width:10px;height:10px;border-radius:3px;background:${WEEK_COLORS[w.w]};margin-left:6px"></span>שבוע ${w.w + 1} <span class="small">(${w.from}–${w.to})</span></div>
+      <div class="b-val num">${pctText(w.score)}</div>
+      <div class="b-track"><i style="width:${(w.score || 0) * 100}%;background:${statusColor(w.score)}"></i></div></div>`).join('');
+  const statusLegend = `<div class="legend-status"><span><i style="background:${STATUS.bad}"></i>מתחת ל-40%</span><span><i style="background:${STATUS.mid}"></i>40%–69%</span><span><i style="background:${STATUS.good}"></i>70% ומעלה</span></div>`;
+  const hasMind = ms.days.some((x) => x.mood || x.motivation);
+  const table = (head, rows) => `<details class="small" style="margin:8px 4px 0"><summary>הצג כטבלה</summary>
+      <table style="width:100%;margin-top:6px;border-collapse:collapse"><tr>${head.map((h) => `<th style="text-align:start;padding:4px">${h}</th>`).join('')}</tr>
+      ${rows.map((r) => `<tr>${r.map((c) => `<td style="padding:4px;border-top:1px solid var(--line)" class="num">${c}</td>`).join('')}</tr>`).join('')}</table></details>`;
+
+  view.innerHTML = `<section class="fade-in">${monthNav()}
+    <div class="insights" style="margin-top:14px">${insights}</div>
+    <div class="section-title"><h2>התקדמות יומית</h2><span class="hint">גע בגרף לפרטים</span></div>
+    <div class="card chart-card">${areaChart('prog', ms.days.map((x) => ({ d: x.d, dk: x.dk, future: x.future, v: x.future ? null : x.pct })))}
+      ${table(['יום', 'בוצעו', 'אחוז'], past.map((x) => [x.d, `${x.done}/${x.total}`, pctText(x.pct)]))}</div>
+    <div class="section-title"><h2>ניתוח לפי הרגל</h2><span class="hint">עד היום</span></div>
+    <div class="card"><div class="bars">${bars}</div>${statusLegend}</div>
+    <div class="section-title"><h2>מצב רוח ומוטיבציה</h2><span class="hint">1 עד 10</span></div>
+    <div class="card chart-card">${hasMind ? `<div class="legend"><span><i style="background:${SERIES.mood}"></i>מצב רוח</span><span><i style="background:${SERIES.motivation}"></i>מוטיבציה</span></div>
+      ${lineChart('mind', ms.days.map((x) => ({ d: x.d, dk: x.dk, future: x.future, mood: x.mood, motivation: x.motivation })), [{ key: 'mood', name: 'מצב רוח', color: SERIES.mood }, { key: 'motivation', name: 'מוטיבציה', color: SERIES.motivation }], 10)}
+      ${table(['יום', 'מצב רוח', 'מוטיבציה'], past.filter((x) => x.mood || x.motivation).map((x) => [x.d, x.mood || '–', x.motivation || '–']))}`
+      : '<p class="small" style="margin:6px 4px">עוד אין נתונים. דרג מצב רוח ומוטיבציה במסך היום.</p>'}</div>
+    <div class="section-title"><h2>ציון מיינדסט שבועי</h2><span class="hint">ממוצע מצב רוח ומוטיבציה</span></div>
+    <div class="card"><div class="bars">${weeks}</div>${statusLegend}</div>
+  </section>`;
+  wireCharts();
+}
+
+/* ------------------------------------------------------------------ HABITS */
+function renderHabits() {
+  const list = habitsList();
+  const existing = new Set(list.map((h) => h.name + '|' + h.emoji));
+  const items = list.map((h, i) => `<div class="mgr-item">
+      <span class="emoji" style="background:color-mix(in srgb, ${h.color} 22%, transparent)" aria-hidden="true">${esc(h.emoji)}</span>
+      <div class="body"><div class="name">${esc(h.name)}</div><div class="days">${daysSummary(h.days)}</div></div>
+      <button class="icon-btn" data-action="move" data-id="${h.id}" data-dir="-1" aria-label="הזז למעלה" ${i === 0 ? 'disabled' : ''}>${ICON.up}</button>
+      <button class="icon-btn" data-action="move" data-id="${h.id}" data-dir="1" aria-label="הזז למטה" ${i === list.length - 1 ? 'disabled' : ''}>${ICON.down}</button>
+      <button class="icon-btn" data-action="edit" data-id="${h.id}" aria-label="ערוך את ${esc(h.name)}">${ICON.edit}</button></div>`).join('');
+  const groups = LIBRARY.map((g) => `<div class="lib-group"><h3>${g.group}</h3><div class="chips">${g.items.map(([n, e]) => {
+    const on = existing.has(n + '|' + e);
+    return `<button class="chip" data-action="lib-add" data-name="${esc(n)}" data-emoji="${esc(e)}" aria-pressed="${on}"><span aria-hidden="true">${e}</span>${esc(n)}<span class="plus" aria-hidden="true">${on ? '✓' : '+'}</span></button>`;
+  }).join('')}</div></div>`).join('');
+  view.innerHTML = `<section class="fade-in">
+    <div class="section-title" style="margin-top:6px"><h2>ההרגלים שלי</h2><span class="hint"><span class="num">${list.length}</span> פעילים</span></div>
+    ${list.length ? `<div class="card list-card">${items}</div>` : '<div class="card small">עוד אין הרגלים. הוסף מהספרייה או צור חדש.</div>'}
+    <button class="btn block" style="margin-top:12px" data-action="new-habit">${ICON.plus} הרגל חדש</button>
+    <div class="section-title"><h2>ספריית הרגלים</h2><span class="hint">הקש כדי להוסיף</span></div>
+    ${groups}
+  </section>`;
+}
+
+/* ------------------------------------------------------------------ sheets */
+const sheet = $('#sheet'), sheetBody = $('#sheetBody'), backdrop = $('#backdrop');
+let sheetOpen = false, sheetCtx = null;
+
+function openSheet(html, ctx = null, focus = false) {
+  sheetBody.innerHTML = html; sheetCtx = ctx;
+  sheet.hidden = false; backdrop.hidden = false;
+  if (!sheetOpen) history.pushState({ sheet: 1 }, '');
+  sheetOpen = true;
+  sheet.scrollTop = 0;
+  if (focus) { const f = sheet.querySelector('input'); if (f) setTimeout(() => f.focus({ preventScroll: true }), 80); }
+}
+function closeSheet(fromPop = false) {
+  if (!sheetOpen) return;
+  sheetOpen = false; sheetCtx = null;
+  sheet.hidden = true; backdrop.hidden = true;
+  if (!fromPop && history.state && history.state.sheet) history.back();
+}
+backdrop.addEventListener('click', () => closeSheet());
+window.addEventListener('popstate', () => { if (sheetOpen) closeSheet(true); });
+document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeSheet(); });
+
+function habitEditor(id) {
+  const h = id ? S.habits[id] : { name: '', emoji: '✅', color: PALETTE[habitsList().length % PALETTE.length], days: [0, 1, 2, 3, 4, 5, 6] };
+  const ctx = { id, emoji: h.emoji, color: h.color, days: new Set(h.days), confirmDelete: false };
+  openSheet(`<h2 id="sheetTitle">${id ? 'עריכת הרגל' : 'הרגל חדש'}</h2>
+    <p class="lead">${id ? 'שינויים נשמרים לכל הימים. ההיסטוריה נשארת.' : 'שם קצר וברור עובד הכי טוב.'}</p>
+    <div class="field"><label for="hName">שם ההרגל</label><input class="input" id="hName" maxlength="40" value="${esc(h.name)}" placeholder="לדוגמה: אימון כוח" autocomplete="off"></div>
+    <div class="field"><div class="label">אייקון</div><div class="emoji-grid" role="group" aria-label="בחירת אייקון">${EMOJIS.map((e) => `<button type="button" data-action="pick-emoji" data-emoji="${e}" aria-pressed="${e === h.emoji}">${e}</button>`).join('')}</div></div>
+    <div class="field"><div class="label">צבע</div><div class="color-row" role="group" aria-label="בחירת צבע">${PALETTE.map((c, i) => `<button type="button" class="swatch" style="background:${c}" data-action="pick-color" data-color="${c}" aria-pressed="${c === h.color}" aria-label="צבע ${i + 1}"></button>`).join('')}</div></div>
+    <div class="field"><div class="label">באילו ימים?</div><div class="daychips" role="group" aria-label="ימים בשבוע">${DAY_LETTERS.map((l, i) => `<button type="button" data-action="pick-dow" data-dow="${i}" aria-pressed="${h.days.includes(i)}" aria-label="יום ${DAY_NAMES[i]}">${l}</button>`).join('')}</div>
+      <div class="btn-row" style="margin-top:8px"><button type="button" class="btn ghost" style="min-height:40px;font-size:14px" data-action="dow-preset" data-set="0,1,2,3,4,5,6">כל יום</button>
+      <button type="button" class="btn ghost" style="min-height:40px;font-size:14px" data-action="dow-preset" data-set="0,1,2,3,4,5">בלי שבת</button>
+      <button type="button" class="btn ghost" style="min-height:40px;font-size:14px" data-action="dow-preset" data-set="0,1,2,3,4">א–ה</button></div></div>
+    <p class="small" id="hErr" style="color:var(--bad);min-height:18px;margin:0 0 8px"></p>
+    <button class="btn block" data-action="save-habit">${id ? 'שמור שינויים' : 'הוסף הרגל'}</button>
+    ${id ? '<button class="btn danger block" style="margin-top:10px" data-action="delete-habit">מחק הרגל</button>' : ''}`, ctx, !id);
+}
+
+function syncStateText() {
+  const st = sync.state, last = Number(lsGet(LS_LAST)) || 0;
+  const ago = last ? relTime(last) : '';
+  return {
+    local: ['הנתונים שמורים רק במכשיר הזה', 'חבר את GitHub כדי לשמור בענן'],
+    syncing: ['מסנכרן…', ''],
+    ok: ['שמור בענן', ago ? `סונכרן ${ago}` : ''],
+    offline: ['אין חיבור לאינטרנט', 'השינויים נשמרים במכשיר ויעלו לענן כשהחיבור יחזור'],
+    error: ['הסנכרון נכשל', 'ננסה שוב אוטומטית. אפשר גם ללחוץ "סנכרן עכשיו"'],
+    auth: ['הטוקן לא תקין או שפג תוקפו', 'צור טוקן חדש וחבר מחדש'],
+  }[st] || ['', ''];
+}
+function relTime(t) {
+  const s = Math.round((now() - t) / 1000);
+  if (s < 45) return 'עכשיו';
+  const m = Math.round(s / 60); if (m < 60) return `לפני ${m} דק׳`;
+  const h = Math.round(m / 60); if (h < 24) return `לפני ${h} שע׳`;
+  return `לפני ${Math.round(h / 24)} ימים`;
+}
+
+function settingsSheet(msg = '') {
+  const token = lsGet(LS_TOKEN), login = lsGet(LS_LOGIN);
+  const [t1, t2] = syncStateText();
+  const connected = !!token;
+  openSheet(`<h2 id="sheetTitle">ענן, גיבוי והגדרות</h2>
+    <div class="status-box" data-state="${sync.state}"><span class="sync-dot"></span><div><div style="font-weight:700">${t1}</div>${t2 ? `<div class="small">${t2}</div>` : ''}</div></div>
+    ${connected ? `<p class="small" style="margin:0 0 12px">מחובר ל-GitHub${login ? ' כ-<span class="num">@' + esc(login) + '</span>' : ''}. הנתונים נשמרים בקובץ סודי בחשבון GitHub שלך. הוא לא מופיע בחיפוש ולא בפרופיל.</p>
+      <div class="btn-row"><button class="btn" data-action="sync-now">${ICON.sync} סנכרן עכשיו</button><button class="btn ghost" data-action="disconnect">התנתק</button></div>`
+    : `<p class="lead">שמירה בענן חינמית דרך GitHub. אחרי החיבור, כל סימון נשמר גם בענן, ואפשר לפתוח את האפליקציה מכל מכשיר.</p>
+      <ol class="steps">
+        <li>לחץ על הכפתור למטה. הוא פותח את GitHub בעמוד יצירת מפתח גישה. אם צריך, התחבר לחשבון.</li>
+        <li>בשדה התוקף בחר:<span class="en">Expiration: No expiration</span>ההרשאה היחידה שצריך כבר מסומנת:<span class="en">gist</span></li>
+        <li>גלול למטה ולחץ:<span class="en">Generate token</span>העתק את הקוד שמתחיל ב:<span class="en">ghp_</span></li>
+        <li>חזור לכאן, הדבק את הקוד בשדה ולחץ "חבר וסנכרן".</li>
+      </ol>
+      <a class="btn ghost block" href="${TOKEN_URL}" target="_blank" rel="noopener">פתח את GitHub ליצירת מפתח</a>
+      <div class="field" style="margin-top:14px"><label for="tokenIn">מפתח הגישה</label><input class="input ltr" id="tokenIn" placeholder="ghp_..." autocomplete="off" autocapitalize="off" spellcheck="false"></div>
+      <p class="small" id="tokErr" style="color:var(--bad);min-height:18px;margin:-8px 0 8px">${esc(msg)}</p>
+      <button class="btn block good" data-action="connect">חבר וסנכרן</button>`}
+    <div class="divider"></div>
+    <div class="field"><label for="nameIn">איך לקרוא לך?</label><input class="input" id="nameIn" maxlength="24" value="${esc(S.profile.name)}" placeholder="השם שלך (לא חובה)"></div>
+    <div class="divider"></div>
+    <div class="label" style="font-weight:600;margin-bottom:8px">גיבוי לקובץ</div>
+    <div class="btn-row"><button class="btn ghost" data-action="export">${ICON.down2} ייצוא</button><button class="btn ghost" data-action="import">${ICON.up2} ייבוא</button></div>
+    <input type="file" id="importIn" accept="application/json,.json" hidden>
+    <p class="small" style="margin-top:14px">המפתח נשמר רק במכשיר הזה ונותן גישה רק ל-Gists. גרסה <span class="num">${APP_VERSION}</span></p>`);
+}
+
+/* ------------------------------------------------------------------ toast & confetti */
+let toastTimer = null;
+function toast(msg, action) {
+  const t = $('#toast');
+  t.innerHTML = esc(msg) + (action ? `<button type="button">${esc(action.label)}</button>` : '');
+  if (action) t.querySelector('button').onclick = () => { action.fn(); t.classList.remove('show'); };
+  t.classList.add('show');
+  clearTimeout(toastTimer); toastTimer = setTimeout(() => t.classList.remove('show'), action ? 5000 : 2400);
+}
+
+function confetti() {
+  if (reduceMotion()) return;
+  const cv = $('#confetti'), ctx = cv.getContext('2d'), dpr = window.devicePixelRatio || 1;
+  cv.width = innerWidth * dpr; cv.height = innerHeight * dpr; ctx.scale(dpr, dpr);
+  const parts = Array.from({ length: 90 }, () => ({
+    x: innerWidth / 2, y: innerHeight * 0.35, vx: (Math.random() - 0.5) * 11, vy: -Math.random() * 11 - 3,
+    r: 3 + Math.random() * 4, c: PALETTE[(Math.random() * PALETTE.length) | 0], a: Math.random() * 6, va: (Math.random() - 0.5) * 0.3,
+  }));
+  const t0 = performance.now();
+  (function frame(t) {
+    ctx.clearRect(0, 0, innerWidth, innerHeight);
+    for (const p of parts) {
+      p.vy += 0.32; p.x += p.vx; p.y += p.vy; p.a += p.va;
+      ctx.save(); ctx.translate(p.x, p.y); ctx.rotate(p.a); ctx.fillStyle = p.c; ctx.fillRect(-p.r, -p.r / 2, p.r * 2, p.r); ctx.restore();
+    }
+    if (t - t0 < 1600) requestAnimationFrame(frame); else ctx.clearRect(0, 0, innerWidth, innerHeight);
+  })(t0);
+}
+
+/* ------------------------------------------------------------------ routing */
+function render() {
+  renderHeader();
+  view.classList.toggle('animate', ui.anim); ui.anim = false;
+  document.querySelectorAll('.tab').forEach((b) => b.setAttribute('aria-current', b.dataset.tab === ui.tab ? 'page' : 'false'));
+  ({ today: renderToday, month: renderMonth, stats: renderStats, habits: renderHabits }[ui.tab] || renderToday)();
+}
+function go(tab) {
+  ui.tab = tab; ui.anim = true;
+  history.replaceState(history.state, '', '#' + tab);
+  window.scrollTo({ top: 0 });
+  render();
+}
+
+/* ------------------------------------------------------------------ events */
+document.addEventListener('click', (e) => {
+  const tabBtn = e.target.closest('.tab');
+  if (tabBtn) { go(tabBtn.dataset.tab); return; }
+  const el = e.target.closest('[data-action]');
+  if (!el || el.disabled) return;
+  const a = el.dataset.action;
+  switch (a) {
+    case 'toggle': {
+      const id = el.dataset.id, dk = ui.day, before = dayStat(dk);
+      const v = !isDone(id, dk);
+      setDone(id, dk, v); vibrate(v ? 12 : 6);
+      render();
+      const card = view.querySelector(`.habit[data-id="${id}"]`); if (card && v) card.classList.add('pop');
+      const after = dayStat(dk);
+      if (v && after.total && after.done === after.total && before.done < before.total) { confetti(); vibrate([30, 40, 30]); }
+      break;
+    }
+    case 'pick-day': ui.day = el.dataset.day; render(); break;
+    case 'go-today': ui.day = todayKey(); render(); break;
+    case 'week': {
+      const nd = addDays(ui.day, Number(el.dataset.dir) * 7), tk = todayKey();
+      ui.day = nd > tk ? tk : nd; render(); break;
+    }
+    case 'toggle-off': ui.showOff = !ui.showOff; render(); break;
+    case 'pick': {
+      const k = el.dataset.key; ui.pick.has(k) ? ui.pick.delete(k) : ui.pick.add(k); render(); break;
+    }
+    case 'start': {
+      [...ui.pick].forEach((k) => { const [n, em] = k.split('|'); addHabit({ name: n, emoji: em }); });
+      ui.pick.clear(); save(); vibrate(20); toast('יאללה, מתחילים 💪'); render(); break;
+    }
+    case 'month': {
+      let { y, m } = ui.month; m += Number(el.dataset.dir);
+      if (m < 0) { m = 11; y--; } if (m > 11) { m = 0; y++; }
+      ui.month = { y, m }; render(); break;
+    }
+    case 'cell': {
+      const v = !isDone(el.dataset.id, el.dataset.day);
+      setDone(el.dataset.id, el.dataset.day, v); vibrate(8);
+      el.setAttribute('aria-pressed', String(v));
+      const wrap = $('#gridWrap'); ui.gridScroll = wrap ? wrap.scrollLeft : null;
+      render();
+      break;
+    }
+    case 'open-day': ui.day = el.dataset.day; go('today'); break;
+    case 'tab': go(el.dataset.tab); break;
+    case 'new-habit': habitEditor(null); break;
+    case 'edit': habitEditor(el.dataset.id); break;
+    case 'move': {
+      const list = habitsList(), i = list.findIndex((h) => h.id === el.dataset.id), j = i + Number(el.dataset.dir);
+      if (j < 0 || j >= list.length) break;
+      [list[i], list[j]] = [list[j], list[i]];
+      const t = now(); list.forEach((h, k) => { S.habits[h.id] = { ...S.habits[h.id], order: k, t }; });
+      save(); render(); break;
+    }
+    case 'lib-add': {
+      if (el.getAttribute('aria-pressed') === 'true') { toast('כבר ברשימה שלך'); break; }
+      const id = addHabit({ name: el.dataset.name, emoji: el.dataset.emoji }); save(); vibrate(10);
+      render();
+      toast(`נוסף: ${el.dataset.name}`, { label: 'בטל', fn: () => { S.habits[id] = { ...S.habits[id], deleted: true, t: now() }; save(); render(); } });
+      break;
+    }
+    case 'pick-emoji': sheetCtx.emoji = el.dataset.emoji; sheet.querySelectorAll('[data-action=pick-emoji]').forEach((b) => b.setAttribute('aria-pressed', String(b === el))); break;
+    case 'pick-color': sheetCtx.color = el.dataset.color; sheet.querySelectorAll('[data-action=pick-color]').forEach((b) => b.setAttribute('aria-pressed', String(b === el))); break;
+    case 'pick-dow': {
+      const d = Number(el.dataset.dow); sheetCtx.days.has(d) ? sheetCtx.days.delete(d) : sheetCtx.days.add(d);
+      el.setAttribute('aria-pressed', String(sheetCtx.days.has(d))); break;
+    }
+    case 'dow-preset': {
+      sheetCtx.days = new Set(el.dataset.set.split(',').map(Number));
+      sheet.querySelectorAll('[data-action=pick-dow]').forEach((b) => b.setAttribute('aria-pressed', String(sheetCtx.days.has(Number(b.dataset.dow)))));
+      break;
+    }
+    case 'save-habit': {
+      const name = $('#hName').value.trim(), err = $('#hErr');
+      if (!name) { err.textContent = 'צריך לתת שם להרגל.'; $('#hName').focus(); break; }
+      if (!sheetCtx.days.size) { err.textContent = 'בחר לפחות יום אחד.'; break; }
+      const data = { name, emoji: sheetCtx.emoji, color: sheetCtx.color, days: [...sheetCtx.days].sort() };
+      if (sheetCtx.id) { updateHabit(sheetCtx.id, data); toast('נשמר'); } else { addHabit(data); save(); toast(`נוסף: ${name}`); }
+      closeSheet(); render(); break;
+    }
+    case 'delete-habit': {
+      if (!sheetCtx.confirmDelete) { sheetCtx.confirmDelete = true; el.textContent = 'לחץ שוב כדי למחוק'; break; }
+      const id = sheetCtx.id, name = S.habits[id].name;
+      updateHabit(id, { deleted: true }); closeSheet(); render();
+      toast(`נמחק: ${name}`, { label: 'בטל', fn: () => { updateHabit(id, { deleted: false }); render(); } });
+      break;
+    }
+    case 'open-settings': settingsSheet(); break;
+    case 'connect': connect(); break;
+    case 'sync-now': sync.run(true).then(() => settingsSheet()); settingsSheet(); break;
+    case 'disconnect': {
+      lsSet(LS_TOKEN, null); lsSet(LS_GIST, null); lsSet(LS_LOGIN, null); lsSet(LS_LAST, null);
+      sync.set('local'); settingsSheet(); toast('נותקת. הנתונים נשארו במכשיר.'); break;
+    }
+    case 'export': {
+      const blob = new Blob([JSON.stringify(S, null, 1)], { type: 'application/json' });
+      const a2 = document.createElement('a'); a2.href = URL.createObjectURL(blob); a2.download = `habits-backup-${todayKey()}.json`;
+      document.body.appendChild(a2); a2.click(); a2.remove(); setTimeout(() => URL.revokeObjectURL(a2.href), 2000);
+      toast('קובץ הגיבוי ירד'); break;
+    }
+    case 'import': $('#importIn').click(); break;
+    default: break;
+  }
+});
+
+document.addEventListener('input', (e) => {
+  const r = e.target.closest('input[data-mind]');
+  if (!r) return;
+  const f = r.dataset.mind, v = Number(r.value);
+  r.classList.remove('unset'); r.style.setProperty('--p', ((v - 1) / 9) * 100 + '%'); r.setAttribute('aria-valuetext', v + ' מתוך 10');
+  const out = $('#mv-' + f); out.classList.remove('empty'); out.innerHTML = `<span class="num">${v}</span>`;
+  setMind(ui.day, f, v);
+  $('#mindScore').textContent = pctText(mindScore(ui.day));
+});
+document.addEventListener('pointerdown', (e) => {
+  // first touch on an unset slider records the default value too
+  const r = e.target.closest('input[data-mind].unset');
+  if (r) setTimeout(() => r.dispatchEvent(new Event('input', { bubbles: true })), 0);
+});
+document.addEventListener('change', (e) => {
+  if (e.target.id === 'nameIn') { S.profile = { name: e.target.value.trim().slice(0, 24), t: now() }; save(); renderHeader(); toast('נשמר'); }
+  if (e.target.id === 'importIn' && e.target.files[0]) {
+    e.target.files[0].text().then((txt) => {
+      const data = JSON.parse(txt);
+      if (!data || typeof data !== 'object' || !data.habits) throw new Error('bad');
+      S = mergeStates(S, data); save(); closeSheet(); render(); toast('הגיבוי נטען ומוזג');
+    }).catch(() => toast('הקובץ לא תקין'));
+  }
+});
+
+/* ------------------------------------------------------------------ cloud sync (GitHub Gist) */
+const sync = {
+  state: 'local', busy: false, again: false, timer: null,
+  set(st) {
+    this.state = st;
+    const chip = $('#syncChip');
+    chip.dataset.state = st;
+    $('.sync-text', chip).textContent = { local: 'במכשיר בלבד', syncing: 'מסנכרן…', ok: 'שמור בענן', offline: 'לא מקוון', error: 'שגיאת סנכרון', auth: 'צריך להתחבר' }[st];
+  },
+  async run(manual = false) {
+    const token = lsGet(LS_TOKEN);
+    if (!token) { this.set('local'); return; }
+    if (!navigator.onLine) { this.set('offline'); return; }
+    if (this.busy) { this.again = true; return; }
+    this.busy = true; this.set('syncing');
+    try {
+      let id = lsGet(LS_GIST);
+      if (!id) { id = await findOrCreateGist(); lsSet(LS_GIST, id); }
+      let remote;
+      try { remote = await fetchRemote(id); } catch (e) {
+        if (e.status === 404) { lsSet(LS_GIST, null); id = await findOrCreateGist(); lsSet(LS_GIST, id); remote = await fetchRemote(id); } else throw e;
+      }
+      const merged = remote ? mergeStates(S, remote) : S;
+      const ms = stableStringify(merged);
+      if (stableStringify(S) !== ms) { S = merged; persistLocal(); render(); }
+      if (!remote || stableStringify(normalize(remote)) !== ms) await pushRemote(id, merged);
+      lsSet(LS_LAST, String(now()));
+      this.set('ok');
+      if (manual) toast('סונכרן ✓');
+    } catch (e) {
+      console.warn('sync failed', e);
+      this.set(e.status === 401 || e.status === 403 ? 'auth' : navigator.onLine ? 'error' : 'offline');
+      if (manual) toast('הסנכרון נכשל');
+    } finally {
+      this.busy = false;
+      if (this.again) { this.again = false; this.run(); }
+    }
+  },
+};
+function scheduleSync() {
+  if (!lsGet(LS_TOKEN)) return;
+  clearTimeout(sync.timer); sync.timer = setTimeout(() => sync.run(), 1200);
+}
+
+async function gh(path, opts = {}, token = lsGet(LS_TOKEN)) {
+  const r = await fetch(GH + path, {
+    method: opts.method || 'GET', cache: 'no-store',
+    headers: { Accept: 'application/vnd.github+json', Authorization: 'Bearer ' + token, 'X-GitHub-Api-Version': '2022-11-28', ...(opts.body ? { 'Content-Type': 'application/json' } : {}) },
+    body: opts.body ? JSON.stringify(opts.body) : undefined,
+  });
+  if (!r.ok) { const e = new Error('GitHub ' + r.status); e.status = r.status; throw e; }
+  return r;
+}
+async function findOrCreateGist() {
+  for (let page = 1; page <= 5; page++) {
+    const list = await (await gh(`/gists?per_page=100&page=${page}`)).json();
+    const g = list.find((x) => x.files && x.files[GIST_FILE]);
+    if (g) return g.id;
+    if (list.length < 100) break;
+  }
+  const g = await (await gh('/gists', { method: 'POST', body: { description: 'Habit Tracker data (private)', public: false, files: { [GIST_FILE]: { content: JSON.stringify(S) } } } })).json();
+  return g.id;
+}
+async function fetchRemote(id) {
+  const g = await (await gh('/gists/' + id)).json();
+  const f = g.files && g.files[GIST_FILE];
+  if (!f) return null;
+  let txt = f.content;
+  if (f.truncated && f.raw_url) txt = await (await fetch(f.raw_url, { cache: 'no-store' })).text();
+  try { return normalize(JSON.parse(txt)); } catch (e) { return null; }
+}
+async function pushRemote(id, data) {
+  await gh('/gists/' + id, { method: 'PATCH', body: { files: { [GIST_FILE]: { content: JSON.stringify(data) } } } });
+}
+async function connect() {
+  const inp = $('#tokenIn'), err = $('#tokErr'), btn = sheet.querySelector('[data-action=connect]');
+  const token = (inp.value || '').trim();
+  if (!token) { err.textContent = 'הדבק את המפתח מ-GitHub.'; inp.focus(); return; }
+  btn.disabled = true; btn.textContent = 'בודק…'; err.textContent = '';
+  try {
+    const r = await gh('/user', {}, token);
+    const user = await r.json();
+    const scopes = r.headers.get('x-oauth-scopes');
+    if (scopes != null && scopes !== '' && !scopes.split(',').map((s) => s.trim()).includes('gist')) {
+      throw Object.assign(new Error('scope'), { scope: true });
+    }
+    lsSet(LS_TOKEN, token); lsSet(LS_LOGIN, user.login || ''); lsSet(LS_GIST, null);
+    await sync.run();
+    if (sync.state === 'ok') { closeSheet(); render(); toast('מחובר. הנתונים שמורים בענן ☁️'); }
+    else settingsSheet('החיבור הצליח, אבל הסנכרון נכשל. נסה "סנכרן עכשיו".');
+  } catch (e) {
+    btn.disabled = false; btn.textContent = 'חבר וסנכרן';
+    err.textContent = e.scope ? 'למפתח חסרה ההרשאה gist. צור מפתח חדש מהכפתור למעלה.'
+      : e.status === 401 ? 'המפתח לא תקין. בדוק שהעתקת את כולו.' : 'אין חיבור ל-GitHub כרגע. נסה שוב.';
+  }
+}
+
+/* ------------------------------------------------------------------ lifecycle */
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState !== 'visible') return;
+  const tk = todayKey();
+  if (tk !== ui.lastToday) { if (ui.day === ui.lastToday) ui.day = tk; ui.lastToday = tk; render(); }
+  sync.run();
+});
+window.addEventListener('online', () => sync.run());
+window.addEventListener('offline', () => { if (lsGet(LS_TOKEN)) sync.set('offline'); });
+
+(function init() {
+  const h = (location.hash || '').slice(1);
+  if (['today', 'month', 'stats', 'habits'].includes(h)) ui.tab = h;
+  history.replaceState(null, '', '#' + ui.tab);
+  sync.set(lsGet(LS_TOKEN) ? (navigator.onLine ? 'syncing' : 'offline') : 'local');
+  render();
+  sync.run();
+  if ('serviceWorker' in navigator && location.protocol !== 'file:') {
+    navigator.serviceWorker.register('sw.js').catch(() => {});
+  }
+})();
