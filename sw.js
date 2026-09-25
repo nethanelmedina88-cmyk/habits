@@ -1,8 +1,8 @@
 /* Offline support: serve the app shell from cache, refresh it in the background. GitHub API calls are never cached. */
-const CACHE = 'habits-v1.2.0';
+const CACHE = 'habits-v1.3.0';
 const SHELL = [
   './', './index.html', './app.css', './app.js', './export.js', './manifest.webmanifest',
-  './heebo.woff2', './montserrat.woff2',
+  './heebo.woff2',
   './icon-192.png', './icon-512.png', './maskable-512.png', './apple-touch-icon.png', './favicon-32.png', './icon.svg',
 ];
 
