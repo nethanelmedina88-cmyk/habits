@@ -1,7 +1,7 @@
 /* Habit tracker PWA: local-first, synced to a private GitHub Gist. No build step, no dependencies. */
 'use strict';
 
-const APP_VERSION = '1.0.0';
+const APP_VERSION = '1.1.0';
 const LS_STATE = 'hp.state.v1';
 const LS_TOKEN = 'hp.token';
 const LS_GIST = 'hp.gist';
@@ -218,6 +218,7 @@ const ICON = {
   down2: '<svg viewBox="0 0 24 24"><path d="M12 4v11M7 10l5 5 5-5M5 20h14"/></svg>',
   up2: '<svg viewBox="0 0 24 24"><path d="M12 20V9M7 14l5-5 5 5M5 4h14"/></svg>',
   sync: '<svg viewBox="0 0 24 24"><path d="M20 12a8 8 0 0 1-14 5.3M4 12a8 8 0 0 1 14-5.3"/><path d="M18 3v4h-4M6 21v-4h4"/></svg>',
+  xls: '<svg viewBox="0 0 24 24"><rect x="4" y="3" width="16" height="18" rx="2.5"/><path d="M9 8l6 8M15 8l-6 8"/></svg>',
 };
 
 function miniRing(pct, color, size = 30) {
@@ -536,6 +537,7 @@ function renderStats() {
       ${rows.map((r) => `<tr>${r.map((c) => `<td style="padding:4px;border-top:1px solid var(--line)" class="num">${c}</td>`).join('')}</tr>`).join('')}</table></details>`;
 
   view.innerHTML = `<section class="fade-in">${monthNav()}
+    <button class="btn ghost block" style="margin-top:12px" data-action="export-xlsx">${ICON.xls} ייצוא לאקסל</button>
     <div class="insights" style="margin-top:14px">${insights}</div>
     <div class="section-title"><h2>התקדמות יומית</h2><span class="hint">גע בגרף לפרטים</span></div>
     <div class="card chart-card">${areaChart('prog', ms.days.map((x) => ({ d: x.d, dk: x.dk, future: x.future, v: x.future ? null : x.pct })))}
@@ -656,6 +658,10 @@ function settingsSheet(msg = '') {
       <button class="btn block good" data-action="connect">חבר וסנכרן</button>`}
     <div class="divider"></div>
     <div class="field"><label for="nameIn">איך לקרוא לך?</label><input class="input" id="nameIn" maxlength="24" value="${esc(S.profile.name)}" placeholder="השם שלך (לא חובה)"></div>
+    <div class="divider"></div>
+    <div class="label" style="font-weight:600;margin-bottom:8px">סיכום באקסל</div>
+    <button class="btn block" data-action="export-xlsx">${ICON.xls} ייצוא לאקסל</button>
+    <p class="small" style="margin:8px 0 0">קובץ עם גיליון סיכום, גיליון לכל חודש עם גרפים, ויומן מלא. לפני הייצוא האפליקציה מסתנכרנת עם הענן, כך שהקובץ כולל את כל המכשירים.</p>
     <div class="divider"></div>
     <div class="label" style="font-weight:600;margin-bottom:8px">גיבוי לקובץ</div>
     <div class="btn-row"><button class="btn ghost" data-action="export">${ICON.down2} ייצוא</button><button class="btn ghost" data-action="import">${ICON.up2} ייבוא</button></div>
@@ -809,6 +815,9 @@ document.addEventListener('click', (e) => {
       toast('קובץ הגיבוי ירד'); break;
     }
     case 'import': $('#importIn').click(); break;
+    case 'export-xlsx': exportXlsx(); break;
+    case 'xlsx-download': downloadBlob(ui.xlsx.blob, ui.xlsx.name); toast('הקובץ ירד'); break;
+    case 'xlsx-share': shareXlsx(); break;
     default: break;
   }
 });
@@ -837,6 +846,47 @@ document.addEventListener('change', (e) => {
     }).catch(() => toast('הקובץ לא תקין'));
   }
 });
+
+/* ------------------------------------------------------------------ Excel export */
+function loadScript(src) {
+  return new Promise((res, rej) => {
+    if (window.HabitsExport) return res();
+    const s = document.createElement('script'); s.src = src; s.onload = res; s.onerror = () => rej(new Error('load ' + src));
+    document.head.appendChild(s);
+  });
+}
+function downloadBlob(blob, name) {
+  const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = name;
+  document.body.appendChild(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(a.href), 4000);
+}
+async function exportXlsx() {
+  if (!habitsList().length) { toast('אין עדיין הרגלים לייצוא'); return; }
+  openSheet(`<h2 id="sheetTitle">ייצוא לאקסל</h2><div class="status-box" data-state="syncing"><span class="sync-dot"></span><div><div style="font-weight:700">מכין את הקובץ…</div><div class="small">${lsGet(LS_TOKEN) ? 'מסנכרן קודם עם הענן' : 'מהנתונים שבמכשיר'}</div></div></div>`);
+  try {
+    if (lsGet(LS_TOKEN)) await sync.run();
+    await loadScript('export.js');
+    const blob = window.HabitsExport.build();
+    const name = `habits-summary-${todayKey()}.xlsx`;
+    ui.xlsx = { blob, name };
+    const file = new File([blob], name, { type: blob.type });
+    const canShare = !!(navigator.canShare && navigator.canShare({ files: [file] }));
+    const months = new Set(Object.keys(S.log).map((k) => k.slice(0, 7))).size || 1;
+    openSheet(`<h2 id="sheetTitle">הקובץ מוכן</h2>
+      <div class="status-box" data-state="ok"><span class="sync-dot"></span><div><div style="font-weight:700">${esc(name)}</div>
+      <div class="small">גיליון סיכום · ${months} ${months === 1 ? 'חודש' : 'חודשים'} עם גרפים · יומן מלא</div></div></div>
+      <div class="btn-row"><button class="btn" data-action="xlsx-download">${ICON.down2} הורדה</button>
+      ${canShare ? `<button class="btn ghost" data-action="xlsx-share">שיתוף</button>` : ''}</div>
+      <p class="small" style="margin-top:12px">הקובץ הוא צילום מצב של רגע הייצוא. לגרסה מעודכנת, מייצאים שוב.</p>`);
+  } catch (e) {
+    console.warn(e);
+    openSheet(`<h2 id="sheetTitle">הייצוא נכשל</h2><p class="lead">בדוק חיבור לאינטרנט ונסה שוב.</p><button class="btn block" data-action="export-xlsx">נסה שוב</button>`);
+  }
+}
+async function shareXlsx() {
+  const { blob, name } = ui.xlsx;
+  try { await navigator.share({ files: [new File([blob], name, { type: blob.type })], title: 'סיכום הרגלים' }); }
+  catch (e) { if (e.name !== 'AbortError') { downloadBlob(blob, name); toast('הקובץ ירד'); } }
+}
 
 /* ------------------------------------------------------------------ cloud sync (GitHub Gist) */
 const sync = {
